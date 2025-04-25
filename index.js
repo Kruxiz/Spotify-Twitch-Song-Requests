@@ -123,12 +123,19 @@ client.on('message', async (channel, tags, message, self) => {
 client.on('redeem', async (channel, username, rewardType, tags, message) => {
     log(`Reward ID: ${rewardType}`);
     if(chatbotConfig.usage_types.includes(channelPointsUsageType) && rewardType === chatbotConfig.custom_reward_id) {
-        let result = await handleSongRequest(channel, tags[displayNameTag], message, false);
+        let result = await handleSongRequest(channel, tags[displayNameTag], message, tags);
         if(!result) {
             if (await twitchAPI.refundPoints()) {
-                console.log(`${username} redeemed a song request that couldn't be completed. It was refunded automatically.`);
+                log(`${username} redeemed a song request that couldn't be completed. It was refunded automatically.`);
             } else {
-                console.log(`${username} redeemed a song request that couldn't be completed. It could not be refunded automatically.`);
+                log(`${username} redeemed a song request that couldn't be completed. It could not be refunded automatically.`);
+            }
+        }
+        if (result) {
+            if(await twitchAPI.fulfillRedemption()){
+                log(`${username} Redemption fulfilled successfully for reward ID ${rewardType}`);
+            } else{
+                log(`${username} Redemption Failed to fulfill successfully for reward ID ${rewardType}`);
             }
         }
     }
@@ -138,7 +145,7 @@ client.on('redeem', async (channel, username, rewardType, tags, message) => {
 let onCheer = async (channel, state, message) => {
     let bitsParse = parseInt(state.bits);
     let bits = isNaN(bitsParse) ? 0 : bitsParse;
-
+  
     if(chatbotConfig.usage_types.includes(bitsUsageType)) {
         let use_exact_amount = chatbotConfig.use_exact_amount_of_bits;
         if(use_exact_amount && bits == chatbotConfig.minimum_requred_bits || !use_exact_amount && bits >= chatbotConfig.minimum_requred_bits) {
@@ -149,12 +156,11 @@ let onCheer = async (channel, state, message) => {
             message = message.split(' ').filter(w => !(w.includes('cheer') && /\d/.test(w))).join(' '); 
             let result = await handleSongRequest(channel, username, message, true);
             if(!result) {
-                console.log(`${username} tried cheering for the song request, but it failed (broken link or something). You will have to add it manually`);
-            }
+            console.log(`${username} tried cheering for the song request, but it failed (broken link or something). You will have to add it manually`);
+          }
         }
     }
-} 
-
+  }
 client.on('cheer', onCheer);
 
 let parseActualSongUrlFromBigMessage = (message) => {
@@ -212,7 +218,7 @@ let handleVoteSkip = async (channel, username) => {
         startOrProgressVoteskip(channel);
 
         usersHaveSkipped.add(username);
-        console.log(`${username} voted to skip the current song (${usersHaveSkipped.size}/${chatbotConfig.required_vote_skip})!`);
+        log(`${username} voted to skip the current song (${usersHaveSkipped.size}/${chatbotConfig.required_vote_skip})!`);
         client.say(channel, `${username} voted to skip the current song (${usersHaveSkipped.size}/${chatbotConfig.required_vote_skip})!`);
     }
     if (usersHaveSkipped.size >= chatbotConfig.required_vote_skip) {
@@ -302,11 +308,11 @@ let handleSongRequest = async (channel, username, message, tags) => {
         }, cooldownDuration);
     } else if (chatbotConfig.use_cooldown) {
         client.say(channel, `${username}, Please wait before requesting another song.`);
-        return false;
+      return false;
     }
 
     return await addValidatedSongToQueue(validatedSongId, channel, username, tags);
-}
+  }
 
 let addValidatedSongToQueue = async (songId, channel, callerUsername, tags) => {
     try {
@@ -330,6 +336,9 @@ let addValidatedSongToQueue = async (songId, channel, callerUsername, tags) => {
             client.say(channel, `It looks like Spotify doesn't want you to use it for some reason. Check the console for details.`);
             console.log(`Spotify doesn't allow requesting songs because: ${error.response.data.error.message}`);
             return false;
+        }
+        if(error.message.includes("max") ) {
+            log(error.message);
         }
         else {
             console.log('ERROR WHILE REACHING SPOTIFY');
@@ -416,7 +425,7 @@ let addSongToQueue = async (songId, channel, callerUsername, tags) => {
 
     if (duration > chatbotConfig.max_duration && !eligible) {
         client.say(channel, `${trackName} is too long. The max duration is ${chatbotConfig.max_duration} seconds`);
-        return;
+        throw new Error(`${trackName} is too long. The max duration is ${chatbotConfig.max_duration} seconds`);
     }
 
     let res = await axios.post(`https://api.spotify.com/v1/me/player/queue?uri=${uri}`, {}, {headers: spotifyHeaders});
@@ -567,22 +576,22 @@ function log(message) {
 }
 
 function isUserEligible(channel, tags, rolesArray) {
-    // If the user is the streamer
-    let userEligible = tags.badges?.broadcaster === '1';
+    const username = tags.username;
+    const channelName = channel.replace('#', '');
 
-    // Or if it's a mod
-    userEligible |= rolesArray.includes(mod) && tags.mod;
+    log(`Checking user: ${username}`);
+    log(`Tags: ${JSON.stringify(tags)}`);
+    log(`Roles to check: ${rolesArray}`);
 
-    // Or if it's a VIP
-    userEligible |= rolesArray.includes(vip) && tags.badges?.vip === '1';
+    const roleChecks = [
+        { check: tags.badges?.broadcaster === '1' || username === channelName, role: streamer },
+        { check: tags.mod === true || tags.mod === '1', role: mod },
+        { check: tags.badges?.vip === '1', role: vip },
+        { check: tags.badges?.subscriber === '1' || tags['badge-info']?.subscriber, role: sub },
+        { check: true, role: everyone },
+    ];
 
-    // Or if it's a subscriber
-    userEligible |= rolesArray.includes(sub) && tags['badge-info']?.subscriber;
-
-    // Or if the tag is set to "everyone"
-    userEligible |= rolesArray.includes(everyone);
-
-    return userEligible > 0;
+    return roleChecks.some(({ check, role }) => check && rolesArray.includes(role));
 }
 
 async function handleSkipSong(channel, tags) {
@@ -591,7 +600,7 @@ async function handleSkipSong(channel, tags) {
 
         if(eligible) {
             client.say(channel, `${tags[displayNameTag]} skipped ${await getCurrentTrackName(channel)}!`);
-            console.log(`${tags[displayNameTag]} skipped ${await getCurrentTrackName(channel)}!`);
+            log(`${tags[displayNameTag]} skipped ${await getCurrentTrackName(channel)}!`);
             let spotifyHeaders = getSpotifyHeaders();
             res = await axios.post('https://api.spotify.com/v1/me/player/next', null, { headers: spotifyHeaders });
         }
@@ -612,7 +621,7 @@ async function handleGetVolume(channel, tags) {
             res = await axios.get('https://api.spotify.com/v1/me/player', { headers: spotifyHeaders });
 
             let currVolume = res.data.device.volume_percent;
-            console.log(`${tags[displayNameTag]}, the current volume is ${currVolume.toString()}!`);
+            log(`${tags[displayNameTag]}, the current volume is ${currVolume.toString()}!`);
             client.say(channel, `${tags[displayNameTag]}, the current volume is ${currVolume.toString()}!`);
         }
     } catch (error) {
@@ -644,7 +653,7 @@ async function handleSetVolume(channel, tags, arg) {
             //courtesy of greav
             res = await axios.put('https://api.spotify.com/v1/me/player/volume', null, { headers: spotifyHeaders, params:{volume_percent: number} });
 
-            console.log(`${tags[displayNameTag]} has set the current volume to ${number.toString()}!`);
+            log(`${tags[displayNameTag]} has set the current volume to ${number.toString()}!`);
             client.say(channel, `${tags[displayNameTag]} has set the current volume to ${number.toString()}!`);
         }
     } catch (error) {

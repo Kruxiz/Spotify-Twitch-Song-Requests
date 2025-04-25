@@ -153,6 +153,27 @@ module.exports = class Twitch {
 
     }
 
+    async fulfillRedemption() {
+        try {
+            let id = await this.getLastRedemptionId();
+            if (id === null) { return false; }
+            await axios.patch(`https://api.twitch.tv/helix/channel_points/custom_rewards/redemptions`,
+                { 'status': 'FULFILLED' },
+                {
+                    params: {
+                        'id': id,
+                        'broadcaster_id': this.broadcaster_id,
+                        'reward_id': this.reward_id
+                    },
+                    headers: this.getTwitchHeaders()
+                });
+            return true;
+        } catch (error) {
+            return false;
+        }
+
+    }
+
     /**
      * Creates a new channel point reward
      * @param name - name of the new reward
