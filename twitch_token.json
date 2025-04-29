@@ -1,0 +1,13 @@
+{
+  "access_token": "izma7hfu97h7fci2pyr79r9vc4nlhz",
+  "expires_in": 15134,
+  "refresh_token": "e0uetzeg9c7rhc26taig3p3c61dl01neop7gs8qmguttvfz8ia",
+  "scope": [
+    "channel:manage:redemptions",
+    "channel:read:redemptions",
+    "chat:edit",
+    "chat:read",
+    "user:read:email"
+  ],
+  "token_type": "bearer"
+}

@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Bot Configuration Dashboard</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            max-width: 900px;
+            margin: 2rem auto;
+        }
+
+        label {
+            display: block;
+            margin-top: 1rem;
+            font-weight: bold;
+        }
+
+        input,
+        textarea,
+        select {
+            width: 100%;
+            padding: 8px;
+            margin-top: 4px;
+        }
+
+        button {
+            margin-top: 1rem;
+            padding: 10px 20px;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Bot Configuration</h1>
+    <form id="configForm">
+        <label>User Name <input id="user_name" name="user_name" type="text" /></label>
+        <label>Channel Name <input id="channel_name" name="channel_name" type="text" /></label>
+
+        <label>Usage Message <input id="usage_message" name="usage_message" type="text" /></label>
+        <label>Wrong Format Message <input id="wrong_format_message" name="wrong_format_message" type="text" /></label>
+
+        <label>Added to Queue Messages <textarea id="added_to_queue_messages"
+                name="added_to_queue_messages"></textarea></label>
+        <label>Song Not Found Message <input id="song_not_found" name="song_not_found" type="text" /></label>
+        <label>Max Duration (seconds) <input id="max_duration" name="max_duration" type="number" /></label>
+
+        <label>Custom Reward ID <input id="custom_reward_id" name="custom_reward_id" type="text" /></label>
+        <label>Automatic Refunds <select id="automatic_refunds" name="automatic_refunds">
+                <option value="true">TRUE</option>
+                <option value="false">FALSE</option>
+            </select></label>
+        <label>Custom Reward Name <input id="custom_reward_name" name="custom_reward_name" type="text" /></label>
+        <label>Custom Reward Cost <input id="custom_reward_cost" name="custom_reward_cost" type="number" /></label>
+
+        <label>Express Port <input id="express_port" name="express_port" type="number" /></label>
+        <label>Enable Logs <select id="logs" name="logs">
+                <option value="true">TRUE</option>
+                <option value="false">FALSE</option>
+            </select></label>
+        <div>
+            <label for="usage_types">Usage Types:</label>
+            <select id="usage_types" name="usage_types" multiple>
+              <option value="command">Command</option>
+              <option value="channel_points">Channel Points</option>
+              <option value="bits">Bits</option>
+            </select>
+          </div>
+          
+          <!-- command_user_level multi-select -->
+          <div>
+            <label for="command_user_level">Command User Level:</label>
+            <select id="command_user_level" name="command_user_level" multiple>
+              <option value="streamer">Streamer</option>
+              <option value="mod">Mod</option>
+              <option value="vip">VIP</option>
+              <option value="sub">Sub</option>
+              <option value="everyone">Everyone</option>
+            </select>
+          </div>
+          
+          <!-- skip_user_level multi-select -->
+          <div>
+            <label for="skip_user_level">Skip User Level:</label>
+            <select id="skip_user_level" name="skip_user_level" multiple>
+              <option value="streamer">Streamer</option>
+              <option value="mod">Mod</option>
+              <option value="vip">VIP</option>
+              <option value="everyone">Everyone</option>
+            </select>
+          </div>
+          
+          <!-- volume_set_level multi-select -->
+          <div>
+            <label for="volume_set_level">Volume Set User Level:</label>
+            <select id="volume_set_level" name="volume_set_level" multiple>
+              <option value="streamer">Streamer</option>
+              <option value="mod">Mod</option>
+              <option value="vip">VIP</option>
+              <option value="everyone">Everyone</option>
+            </select>
+          </div>
+          
+          <!-- ignore_max_length multi-select -->
+          <div>
+            <label for="ignore_max_length">Ignore Max Length:</label>
+            <select id="ignore_max_length" name="ignore_max_length" multiple>
+              <option value="streamer">Streamer</option>
+              <option value="mod">Mod</option>
+              <option value="vip">VIP</option>
+              <option value="everyone">Everyone</option>
+            </select>
+          </div>
+          <button type="button" id="save-btn">Save</button>       
+    </form>
+    <div id="status"></div>
+
+    <script>
+        async function loadConfig() {
+            const res = await fetch('/api/config');
+            const data = await res.json();
+            for (const key in data) {
+                const field = document.getElementById(key);
+                if (field) {
+                    if (Array.isArray(data[key])) {
+                        field.value = data[key].join('\n');
+                    } else {
+                        field.value = data[key];
+                    }
+                }
+            }
+        }
+
+        document.getElementById('configForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const form = e.target;
+            const formData = new FormData(form);
+            const config = {};
+
+            for (const [key, value] of formData.entries()) {
+                const field = document.getElementById(key);
+                if (field.tagName === 'TEXTAREA' && value.includes('\n')) {
+                    config[key] = value.split('\n').map(line => line.trim()).filter(line => line);
+                } else if (field.type === 'number') {
+                    config[key] = Number(value);
+                } else if (field.type === 'select-one') {
+                    config[key] = value === 'true';
+                } else {
+                    config[key] = value;
+                }
+            }
+
+            const res = await fetch('/api/config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(config)
+            });
+
+            if (res.ok) {
+                document.getElementById('status').textContent = '✅ Saved successfully';
+            } else {
+                document.getElementById('status').textContent = '❌ Save failed';
+            }
+        });
+
+        loadConfig();
+
+        window.onload = async function () {
+            try {
+                const res = await fetch('/api/config');
+                const config = await res.json();
+
+                // Populate form fields
+                for (const key in config) {
+                    if (!config.hasOwnProperty(key)) continue;
+
+                    const field = document.getElementById(key);
+                    if (!field) continue;
+
+                    if (Array.isArray(config[key])) {
+                        field.value = config[key].join(', ');
+                    } else if (typeof config[key] === 'boolean') {
+                        field.value = config[key] ? 'true' : 'false';
+                    } else {
+                        field.value = config[key];
+                    }
+                }
+            } catch (err) {
+                console.error('Error loading config:', err);
+                alert("Failed to load config.");
+            }
+        };
+
+        document.getElementById('save-btn').addEventListener('click', async () => {
+            const form = document.getElementById('config-form');
+            const data = {};
+
+            for (const element of form.elements) {
+                if (!element.name) continue;
+                data[element.name] = element.value;
+            }
+
+            try {
+                const res = await fetch('/api/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(data)
+                });
+
+                const result = await res.json();
+                if (result.success) {
+                    alert('Config saved successfully!');
+                } else {
+                    alert('Failed to save config.');
+                }
+            } catch (err) {
+                console.error('Error saving config:', err);
+                alert('An error occurred while saving.');
+            }
+        });
+
+    </script>
+
+<script>
+    function getSelectedValues(fieldId) {
+      return Array.from(document.getElementById(fieldId).selectedOptions).map(opt => opt.value);
+    }
+  
+    document.getElementById('save-btn').addEventListener('click', () => {
+      const updatedConfig = {
+        usage_types: getSelectedValues('usage_types'),
+        command_user_level: getSelectedValues('command_user_level'),
+        skip_user_level: getSelectedValues('skip_user_level'),
+        volume_set_level: getSelectedValues('volume_set_level'),
+        ignore_max_length: getSelectedValues('ignore_max_length')
+      };
+  
+      fetch('/api/save-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updatedConfig)
+      }).then(res => {
+        if (res.ok) alert('Configuration saved!');
+        else alert('Failed to save configuration.');
+      });
+    });
+  
+    // Populate multi-selects from existing config
+    fetch('/api/config')
+      .then(res => res.json())
+      .then(config => {
+        const multiFields = [
+          'usage_types',
+          'command_user_level',
+          'skip_user_level',
+          'volume_set_level',
+          'ignore_max_length'
+        ];
+        multiFields.forEach(field => {
+          const select = document.getElementById(field);
+          if (!select || !Array.isArray(config[field])) return;
+          Array.from(select.options).forEach(opt => {
+            opt.selected = config[field].includes(opt.value);
+          });
+        });
+      });
+  </script>
+  
+
+</body>
+
+</html>
