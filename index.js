@@ -1,16 +1,12 @@
 const express = require('express');
-
 const fs = require('fs');
 const YAML = require('yaml');
-
 const tmi = require('tmi.js');
 const axios = require('axios').default;
-
 const open = require('open');
-
 const Twitch = require('./twitchcontroller');
-
 const pack = require('./package.json');
+const path = require('path');
 
 let spotifyRefreshToken = '';
 let spotifyAccessToken = '';
@@ -39,9 +35,9 @@ const spotifyShareUrlMaker = `${spotifyShareUrlBase}/track/`;
 const spotifyShareUrlMakerRegex = `${spotifyShareUrlBase}/(?:.*)?track/[^\\s]+`;
 const spotifyShareUriMaker = 'spotify:track:';
 
-const chatbotConfig = setupYamlConfigs();
-const expressPort = chatbotConfig.express_port;
-const cooldownDuration = chatbotConfig.cooldown_duration * 1000;
+const currentConfig = setupYamlConfigs();
+const expressPort = currentConfig.express_port;
+const cooldownDuration = currentConfig.cooldown_duration * 1000;
 const usersOnCooldown = new Set();
 const usersHaveSkipped = new Set();
 
@@ -58,110 +54,117 @@ axios.get("https://api.github.com/repos/KumoKairo/Spotify-Twitch-Song-Requests/r
     }, () => console.log("Failed to check for updates."));
 
 // TWITCH SETUP
-const twitchAPI = new Twitch();
-twitchAPI.init(chatbotConfig, twitchOauthTokenRefunds, twitchClientId).then(() => chatbotConfig.custom_reward_id = twitchAPI.reward_id);
+(async () => {
+    const twitchAPI = new Twitch();
+    await twitchAPI.init(currentConfig); // no token or ID passed
+    console.log(twitchAPI.token)
+    const client = new tmi.Client({
+        options: { debug: true },
+        connection: {
+            secure: true,
+            reconnect: true
+        },
+        identity: {
+            username: currentConfig.user_name,
+            password: `oauth:${twitchAPI.token}`
+        },
+        channels: [ currentConfig.channel_name ]
+    });
+    
+    client.connect().catch(console.error);
+    
+    console.log(`Logged in as ${currentConfig.user_name}. Working on channel '${currentConfig.channel_name}'`);
+    
+    client.on('message', async (channel, tags, message, self) => {
+        if(self) return;
+        let messageToLower = message.toLowerCase();
+    
+        if(currentConfig.usage_types.includes(commandUsageType)
+            && currentConfig.command_alias.includes(messageToLower.split(" ")[0])
+            && isUserEligible(channel, tags, currentConfig.command_user_level)) {
+            let args = messageToLower.split(" ")[1];
+                if (!args) {
+                    client.say(currentConfig.channel_name, `${tags[displayNameTag]}, usage: !songrequest song-link (Spotify -> Share -> Copy Song Link)`);
+                } else {
+                    await handleSongRequest(channel, tags[displayNameTag], message, tags, true);
+                }
+        } else if (currentConfig.allow_volume_set && messageToLower.split(" ")[0] == '!volume') {
+            let args = messageToLower.split(" ")[1];
+                if (!args) {
+                    await handleGetVolume(channel, tags);
+                } else {
+                    await handleSetVolume(channel, tags, args);
+                }
+        }
+        else if (messageToLower === currentConfig.skip_alias) {
+            await handleSkipSong(channel, tags);
+        }
+        else if (currentConfig.use_song_command && messageToLower === '!song') {
+            await handleTrackName(channel);
+        }
+        else if (currentConfig.use_queue_command && messageToLower === '!queue') {
+            await handleQueue(channel);
+        }
+        else if (currentConfig.allow_vote_skip && messageToLower === '!voteskip' ) {
+            await handleVoteSkip(channel, tags[displayNameTag]);
+        }
+    });
+    
+    client.on('redeem', async (channel, username, rewardType, tags, message) => {
+        log(`Reward ID: ${rewardType}`);
+        if(currentConfig.usage_types.includes(channelPointsUsageType) && rewardType === currentConfig.custom_reward_id) {
+            let result = await handleSongRequest(channel, tags[displayNameTag], message, tags);
+            if(!result) {
+                if (await twitchAPI.refundPoints()) {
+                    log(`${username} redeemed a song request that couldn't be completed. It was refunded automatically.`);
+                } else {
+                    log(`${username} redeemed a song request that couldn't be completed. It could not be refunded automatically.`);
+                }
+            }
+            if (result) {
+                if(await twitchAPI.fulfillRedemption()){
+                    log(`${username} Redemption fulfilled successfully for reward ID ${rewardType}`);
+                } else{
+                    log(`${username} Redemption Failed to fulfill successfully for reward ID ${rewardType}`);
+                }
+            }
+        }
+    });
+    
+    // Extracted for easier debugging without spending actual bits (can be called from client.on('message'))
+    let onCheer = async (channel, state, message) => {
+        let bitsParse = parseInt(state.bits);
+        let bits = isNaN(bitsParse) ? 0 : bitsParse;
+      
+        if(currentConfig.usage_types.includes(bitsUsageType)) {
+            let use_exact_amount = currentConfig.use_exact_amount_of_bits;
+            if(use_exact_amount && bits == currentConfig.minimum_requred_bits || !use_exact_amount && bits >= currentConfig.minimum_requred_bits) {
+                let username = state[displayNameTag];
+                // afaik, bit redeems include the word "bits" which can mess up the search query.
+                // we disassemble the phrase, remove anything with 'cheerX' where X is any number or digit
+                // not likely that a lot of songs contain word 'Cheer15' in their names
+                message = message.split(' ').filter(w => !(w.includes('cheer') && /\d/.test(w))).join(' '); 
+                let result = await handleSongRequest(channel, username, message, true);
+                if(!result) {
+                console.log(`${username} tried cheering for the song request, but it failed (broken link or something). You will have to add it manually`);
+              }
+            }
+        }
+      }
+    client.on('cheer', onCheer);
+})();
+
+//dashboard setup
+//const startDashboardServer = require('./dashboard');
+//startDashboardServer();
 
 const validTypes = [channelPointsUsageType, commandUsageType, bitsUsageType]
-if(!validTypes.some(type => chatbotConfig.usage_types.includes(type))) {
+if(!validTypes.some(type => currentConfig.usage_types.includes(type))) {
     console.log(`Usage type is neither '${channelPointsUsageType}', '${commandUsageType}' nor '${bitsUsageType}', app will not work. Edit your settings in the 'spotipack_config.yaml' file`);
 }
 
 
 const redirectUri = `http://localhost:${expressPort}/callback`;
-
-const client = new tmi.Client({
-    connection: {
-        secure: true,
-        reconnect: true
-    },
-    identity: {
-        username: chatbotConfig.user_name,
-        password: twitchOauthToken
-    },
-    channels: [ chatbotConfig.channel_name ]
-});
-
-client.connect().catch(console.error);
-
-console.log(`Logged in as ${chatbotConfig.user_name}. Working on channel '${chatbotConfig.channel_name}'`);
-
-client.on('message', async (channel, tags, message, self) => {
-    if(self) return;
-    let messageToLower = message.toLowerCase();
-
-    if(chatbotConfig.usage_types.includes(commandUsageType)
-        && chatbotConfig.command_alias.includes(messageToLower.split(" ")[0])
-        && isUserEligible(channel, tags, chatbotConfig.command_user_level)) {
-        let args = messageToLower.split(" ")[1];
-            if (!args) {
-                client.say(chatbotConfig.channel_name, `${tags[displayNameTag]}, usage: !songrequest song-link (Spotify -> Share -> Copy Song Link)`);
-            } else {
-                await handleSongRequest(channel, tags[displayNameTag], message, tags, true);
-            }
-    } else if (chatbotConfig.allow_volume_set && messageToLower.split(" ")[0] == '!volume') {
-        let args = messageToLower.split(" ")[1];
-            if (!args) {
-                await handleGetVolume(channel, tags);
-            } else {
-                await handleSetVolume(channel, tags, args);
-            }
-    }
-    else if (messageToLower === chatbotConfig.skip_alias) {
-        await handleSkipSong(channel, tags);
-    }
-    else if (chatbotConfig.use_song_command && messageToLower === '!song') {
-        await handleTrackName(channel);
-    }
-	else if (chatbotConfig.use_queue_command && messageToLower === '!queue') {
-        await handleQueue(channel);
-    }
-    else if (chatbotConfig.allow_vote_skip && messageToLower === '!voteskip' ) {
-        await handleVoteSkip(channel, tags[displayNameTag]);
-    }
-});
-
-client.on('redeem', async (channel, username, rewardType, tags, message) => {
-    log(`Reward ID: ${rewardType}`);
-    if(chatbotConfig.usage_types.includes(channelPointsUsageType) && rewardType === chatbotConfig.custom_reward_id) {
-        let result = await handleSongRequest(channel, tags[displayNameTag], message, tags);
-        if(!result) {
-            if (await twitchAPI.refundPoints()) {
-                log(`${username} redeemed a song request that couldn't be completed. It was refunded automatically.`);
-            } else {
-                log(`${username} redeemed a song request that couldn't be completed. It could not be refunded automatically.`);
-            }
-        }
-        if (result) {
-            if(await twitchAPI.fulfillRedemption()){
-                log(`${username} Redemption fulfilled successfully for reward ID ${rewardType}`);
-            } else{
-                log(`${username} Redemption Failed to fulfill successfully for reward ID ${rewardType}`);
-            }
-        }
-    }
-});
-
-// Extracted for easier debugging without spending actual bits (can be called from client.on('message'))
-let onCheer = async (channel, state, message) => {
-    let bitsParse = parseInt(state.bits);
-    let bits = isNaN(bitsParse) ? 0 : bitsParse;
-  
-    if(chatbotConfig.usage_types.includes(bitsUsageType)) {
-        let use_exact_amount = chatbotConfig.use_exact_amount_of_bits;
-        if(use_exact_amount && bits == chatbotConfig.minimum_requred_bits || !use_exact_amount && bits >= chatbotConfig.minimum_requred_bits) {
-            let username = state[displayNameTag];
-            // afaik, bit redeems include the word "bits" which can mess up the search query.
-            // we disassemble the phrase, remove anything with 'cheerX' where X is any number or digit
-            // not likely that a lot of songs contain word 'Cheer15' in their names
-            message = message.split(' ').filter(w => !(w.includes('cheer') && /\d/.test(w))).join(' '); 
-            let result = await handleSongRequest(channel, username, message, true);
-            if(!result) {
-            console.log(`${username} tried cheering for the song request, but it failed (broken link or something). You will have to add it manually`);
-          }
-        }
-    }
-  }
-client.on('cheer', onCheer);
 
 let parseActualSongUrlFromBigMessage = (message) => {
     const regex = new RegExp(spotifyShareUrlMakerRegex);
@@ -193,7 +196,7 @@ let handleTrackName = async (channel) => {
             await refreshAccessToken();
             await printTrackName(channel);
         } else {
-            client.say(chatbotConfig.channel_name, 'Seems like no music is playing right now');
+            client.say(currentConfig.channel_name, 'Seems like no music is playing right now');
         }
     }
 }
@@ -207,7 +210,7 @@ let handleQueue = async (channel) => {
             await refreshAccessToken();
             await printQueue(channel);
         } else {
-            client.say(chatbotConfig.channel_name, `Seems like no music is playing right now`);
+            client.say(currentConfig.channel_name, `Seems like no music is playing right now`);
         }
     }
 }
@@ -218,14 +221,14 @@ let handleVoteSkip = async (channel, username) => {
         startOrProgressVoteskip(channel);
 
         usersHaveSkipped.add(username);
-        log(`${username} voted to skip the current song (${usersHaveSkipped.size}/${chatbotConfig.required_vote_skip})!`);
-        client.say(channel, `${username} voted to skip the current song (${usersHaveSkipped.size}/${chatbotConfig.required_vote_skip})!`);
+        log(`${username} voted to skip the current song (${usersHaveSkipped.size}/${currentConfig.required_vote_skip})!`);
+        client.say(channel, `${username} voted to skip the current song (${usersHaveSkipped.size}/${currentConfig.required_vote_skip})!`);
     }
-    if (usersHaveSkipped.size >= chatbotConfig.required_vote_skip) {
+    if (usersHaveSkipped.size >= currentConfig.required_vote_skip) {
         usersHaveSkipped.clear();
         clearTimeout(voteskipTimeout);
-        console.log(`Chat has skipped ${await getCurrentTrackName(channel)} (${chatbotConfig.required_vote_skip}/${chatbotConfig.required_vote_skip})!`);
-        client.say(channel, `Chat has skipped ${await getCurrentTrackName(channel)} (${chatbotConfig.required_vote_skip}/${chatbotConfig.required_vote_skip})!`);
+        console.log(`Chat has skipped ${await getCurrentTrackName(channel)} (${currentConfig.required_vote_skip}/${currentConfig.required_vote_skip})!`);
+        client.say(channel, `Chat has skipped ${await getCurrentTrackName(channel)} (${currentConfig.required_vote_skip}/${currentConfig.required_vote_skip})!`);
         let spotifyHeaders = getSpotifyHeaders();
         res = await axios.post('https://api.spotify.com/v1/me/player/next', {}, { headers: spotifyHeaders });
     }
@@ -272,7 +275,7 @@ let printQueue = async (channel) => {
 	else {
 		let songIndex = 1;
 		let concatQueue = '';
-        let queueDepthIndex = chatbotConfig.queue_display_depth;
+        let queueDepthIndex = currentConfig.queue_display_depth;
 
         res.data.queue?.every(qItem => {
             let trackName = qItem.name;
@@ -292,21 +295,21 @@ let printQueue = async (channel) => {
             }
         })
 
-        client.say(channel, `▶️ Next ${chatbotConfig.queue_display_depth} songs: ${concatQueue}`);
+        client.say(channel, `▶️ Next ${currentConfig.queue_display_depth} songs: ${concatQueue}`);
 	}
 }
 
 let handleSongRequest = async (channel, username, message, tags) => {
     let validatedSongId = await validateSongRequest(message, channel);
     if(!validatedSongId) {
-        client.say(channel, chatbotConfig.song_not_found);
+        client.say(channel, currentConfig.song_not_found);
         return false;
-    }  else if (chatbotConfig.use_cooldown && !usersOnCooldown.has(username)) {
+    }  else if (currentConfig.use_cooldown && !usersOnCooldown.has(username)) {
         usersOnCooldown.add(username);
         setTimeout(() => {
             usersOnCooldown.delete(username)
         }, cooldownDuration);
-    } else if (chatbotConfig.use_cooldown) {
+    } else if (currentConfig.use_cooldown) {
         client.say(channel, `${username}, Please wait before requesting another song.`);
       return false;
     }
@@ -329,7 +332,7 @@ let addValidatedSongToQueue = async (songId, channel, callerUsername, tags) => {
             return false;
         }
         if(error?.response?.data?.error?.status === 400) {
-            client.say(channel, chatbotConfig.song_not_found);
+            client.say(channel, currentConfig.song_not_found);
             return false;
         }
         if(error?.response?.status === 403) {
@@ -353,7 +356,7 @@ let addValidatedSongToQueue = async (songId, channel, callerUsername, tags) => {
 
 let searchTrackID = async (searchString) => {
     // Excluding command aliases from the query string
-    chatbotConfig.command_alias.forEach(alias => {
+    currentConfig.command_alias.forEach(alias => {
         searchString = searchString.replace(alias, '');
     });
 
@@ -365,7 +368,7 @@ let searchTrackID = async (searchString) => {
         headers: spotifyHeaders
     });
     let trackId = searchResponse.data.tracks.items[0]?.id;
-    if (chatbotConfig.blocked_tracks.includes(trackId)) {
+    if (currentConfig.blocked_tracks.includes(trackId)) {
         return false;
     } else {
         return trackId;
@@ -395,7 +398,7 @@ let validateSongRequest = async (message, channel) => {
 
 let getTrackId = (url) => {
     let trackId = url.split('/').pop().split('?')[0];
-    if (chatbotConfig.blocked_tracks.includes(trackId)) {
+    if (currentConfig.blocked_tracks.includes(trackId)) {
         return false;
     } else {
         return trackId;
@@ -421,11 +424,11 @@ let addSongToQueue = async (songId, channel, callerUsername, tags) => {
     let uri = trackInfo.uri;
 
     let duration = trackInfo.duration_ms / 1000;
-    let eligible = isUserEligible(channel, tags, chatbotConfig.ignore_max_length);
+    let eligible = isUserEligible(channel, tags, currentConfig.ignore_max_length);
 
-    if (duration > chatbotConfig.max_duration && !eligible) {
-        client.say(channel, `${trackName} is too long. The max duration is ${chatbotConfig.max_duration} seconds`);
-        throw new Error(`${trackName} is too long. The max duration is ${chatbotConfig.max_duration} seconds`);
+    if (duration > currentConfig.max_duration && !eligible) {
+        client.say(channel, `${trackName} is too long. The max duration is ${currentConfig.max_duration} seconds`);
+        throw new Error(`${trackName} is too long. The max duration is ${currentConfig.max_duration} seconds`);
     }
 
     let res = await axios.post(`https://api.spotify.com/v1/me/player/queue?uri=${uri}`, {}, {headers: spotifyHeaders});
@@ -436,7 +439,7 @@ let addSongToQueue = async (songId, channel, callerUsername, tags) => {
         username: callerUsername
     }
 
-    client.say(channel, handleMessageQueries(chatbotConfig.added_to_queue_messages, trackParams));
+    client.say(channel, handleMessageQueries(currentConfig.added_to_queue_messages, trackParams));
 }
 
 let refreshAccessToken = async () => {
@@ -510,11 +513,34 @@ app.get('/callback', async (req, res) => {
     res.send('Tokens refreshed successfully. You can close this tab');
 });
 
+app.get('/now-playing', async (req, res) => {
+    const track = await getCurrentTrack();
+    res.send(`
+      <html>
+        <head>
+          <style>
+            body { margin: 0; font-family: sans-serif; background: transparent; color: white; }
+            .track { font-size: 24px; padding: 10px; background: rgba(0,0,0,0.6); border-radius: 10px; }
+          </style>
+        </head>
+        <body>
+          <div class="track">${track || 'Nothing playing right now'}</div>
+        </body>
+      </html>
+    `);
+  });
+
+
 app.listen(expressPort);
 
+console.log(`Now Playing overlay at http://localhost:${expressPort}/now-playing`);
 console.log(`App is running. Visit http://localhost:${expressPort}/login to refresh the tokens if the page didn't open automatically`);
 open(`http://localhost:${expressPort}/login`);
-
+//open('http://localhost:3002');
+/**
+ * Reads the configuration file and checks if it is valid.
+ * @returns {object} The configuration object from the yaml file
+ */
 function setupYamlConfigs () {
     const configFile = fs.readFileSync('spotipack_config.yaml', 'utf8');
     let fileConfig = YAML.parse(configFile);
@@ -523,19 +549,60 @@ function setupYamlConfigs () {
 
     return fileConfig;
 }
+function reloadConfig() {
+    currentConfig = setupYamlConfigs();
+    // Optional: reinitialize any components using the new config
+    if (global.twitchController) {
+        global.twitchController.init(currentConfig, global.token, global.clientId); // reuse init params
+    }
+    console.log("🔁 Config reloaded");
+}
 
+module.exports = {
+    currentConfig,
+    reloadConfig
+};
+
+
+/**
+ * If voteskip is enabled, starts or progresses the voteskip timer.
+ * If someone has already voted to skip, the timer is cleared and the timeout is reset to the timeout specified in the config file.
+ * @param {string} channel - The channel to start or progress the voteskip in.
+ */
 function startOrProgressVoteskip(channel) {
     if (usersHaveSkipped.size > 0) {
         clearTimeout(voteskipTimeout);
     }
 
-    voteskipTimeout = setTimeout(function() {resetVoteskip(channel)}, chatbotConfig.voteskip_timeout * 1000);
+    voteskipTimeout = setTimeout(function() {resetVoteskip(channel)}, currentConfig.voteskip_timeout * 1000);
 }
+
+/**
+ * Resets the voteskip process for a given channel.
+ * Sends a message indicating that the voteskip has timed out and clears the list of users who have voted to skip.
+ *
+ * @param {string} channel - The channel where the voteskip is being reset.
+ */
 
 function resetVoteskip(channel) {
     client.say(channel, `Voteskip has timed out... No song will be skipped at this time! catJAM`);
     usersHaveSkipped.clear();
 }
+
+
+
+
+/**
+ * Validates the setup configuration for the chatbot.
+ *
+ * This function checks the usage types specified in the configuration and ensures that
+ * necessary parameters are provided. If 'channel_points' is included in 'usage_types',
+ * a custom Reward ID must be set. If 'command' is included, at least one command alias
+ * must be provided. It also normalizes the command aliases to lowercase.
+ *
+ * @param {object} fileConfig - The configuration object from the YAML file.
+ * @returns {object} The validated and possibly modified configuration object.
+ */
 
 function checkIfSetupIsCorrect(fileConfig) {
     if (fileConfig.usage_types.includes(channelPointsUsageType) && fileConfig.custom_reward_id === defaultRewardId) {
@@ -552,7 +619,35 @@ function checkIfSetupIsCorrect(fileConfig) {
     }
     return fileConfig;
 }
+/**
+ * Given an array of messages and an object of parameters, this function
+ * randomly selects one of the messages and replaces placeholders with
+ * the corresponding values from the parameters object.
+ *
+ * Supported placeholders are:
+ * - $(username)
+ * - $(trackName)
+ * - $(artists)
+ *
+ * @param {string[]} messages - Array of messages to choose from.
+ * @param {object} params - Object containing the values to replace the placeholders with.
+ * @returns {string} The final message with placeholders replaced.
+ */
 
+/**
+ * Given an array of messages and an object of parameters, this function
+ * randomly selects one of the messages and replaces placeholders with
+ * the corresponding values from the parameters object.
+ *
+ * Supported placeholders are:
+ * - $(username)
+ * - $(trackName)
+ * - $(artists)
+ *
+ * @param {string[]} messages - Array of messages to choose from.
+ * @param {object} params - Object containing the values to replace the placeholders with.
+ * @returns {string} The final message with placeholders replaced.
+ */
 function handleMessageQueries (messages, params) {
     let newMessage = messages[Math.floor(Math.random() * messages.length)];
 
@@ -569,12 +664,25 @@ function handleMessageQueries (messages, params) {
     return newMessage;
 }
 
+/**
+ * Logs a message to the console if the logs option is enabled in the configuration.
+ *
+ * @param {string} message - The message to log.
+ */
 function log(message) {
-    if(chatbotConfig.logs) {
+    if(currentConfig.logs) {
         console.log(message);
     }
 }
 
+/**
+ * Checks if the given user is eligible for a song request given their roles.
+ *
+ * @param {string} channel - The channel name to check.
+ * @param {object} tags - The user's tags.
+ * @param {string[]} rolesArray - Roles to check the user against.
+ * @returns {boolean} Whether the user is eligible to request a song.
+ */
 function isUserEligible(channel, tags, rolesArray) {
     const username = tags.username;
     const channelName = channel.replace('#', '');
@@ -596,7 +704,7 @@ function isUserEligible(channel, tags, rolesArray) {
 
 async function handleSkipSong(channel, tags) {
     try {
-        let eligible = isUserEligible(channel, tags, chatbotConfig.skip_user_level);
+        let eligible = isUserEligible(channel, tags, currentConfig.skip_user_level);
 
         if(eligible) {
             client.say(channel, `${tags[displayNameTag]} skipped ${await getCurrentTrackName(channel)}!`);
@@ -614,7 +722,7 @@ async function handleSkipSong(channel, tags) {
 
 async function handleGetVolume(channel, tags) {
     try {
-        let eligible = isUserEligible(channel, tags, chatbotConfig.volume_set_level);
+        let eligible = isUserEligible(channel, tags, currentConfig.volume_set_level);
 
         if(eligible) {
             let spotifyHeaders = getSpotifyHeaders();
@@ -635,7 +743,7 @@ async function handleGetVolume(channel, tags) {
 async function handleSetVolume(channel, tags, arg) {
 
     try {
-        let eligible = isUserEligible(channel, tags, chatbotConfig.volume_set_level);
+        let eligible = isUserEligible(channel, tags, currentConfig.volume_set_level);
 
         if(eligible) {
 
